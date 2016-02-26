@@ -1,0 +1,1126 @@
+---
+title: "EPO et ARVALIS etude de la structure"
+author: "J. David"
+date: "25 février 2016"
+output: pdf_document
+---
+
+
+Ce document sert à l'élaboration de la publication commune des données d'Arvalis et de la population EPO.
+
+Il vise à consolider la construction de la démarche et la construction du script.
+
+Un soin particulier sera donné aux noms des fichiers de données initiales et aux sorties qui en sont faites.
+
+# Préambule 
+
+## Les fonctions nécessaires au script
+
+```{r}
+## fonctions
+# tirage : cette fonction remplace les données manquantes par un tirage binomial , paramètre moyenne de l'échantillon 
+tirage<-function(x) {
+  x<-as.numeric(x)
+  manq<-which(is.na(x))
+  x2<-x[-manq]
+  freq<-sum(x2) / (2 * length(x2))
+  if (length(manq)>0) {
+    for (i in 1:length(manq)) {
+      ## tire un 0 avec la proba de 1 - freq.allelique et un 2 avec la proba freq.allelique
+      x[manq[i]]<-sample(x=c(0,2),1,prob=c((1-freq),freq))
+    }
+  }
+  return(x)
+}
+
+# cette fonction remplace le codage A/A A/T T/T par 0,1,2
+# est utile avec plyr mais aussi avec apply
+n_genotypes<- function(x) { x<-as.factor(as.character(x)) 
+                                ngen<-nlevels(x)
+                                liste<-levels(x)
+                                x<-as.character(x)
+                                if( ngen==2 ) 
+                                  { x[x==liste[1]]<-"0"
+                                   x[x==liste[2]]<- "2" 
+                                   }
+                                else if (ngen==3) 
+                                  { x[x==liste[1]]<- "0"
+                                    x[x==liste[2]]<- "1"
+                                    x[x==liste[3]]<- "2"
+                                   }
+                                return(x)} 
+
+# fonction pour estimer la kinship
+estimKinship2<- function(genos.dose){
+  tmp <-genos.dose-1  
+  P <- ncol(tmp) # ajout
+  K <- (1/(2*P)) * tcrossprod(tmp, tmp) + 0.5
+  return(K)
+}
+
+
+# fonction de calcul des fréquences alléliques tenant compte des donnees manquantes
+freqall <- function (MatG) {
+  allele.freqs <- apply(MatG, 2, function(x){
+    x<-as.numeric(x)
+    if (length(which(is.na(x))) >0 ) { x<-x[-which(is.na(x))]}
+    sum(x) / (2 * length(x))
+  })
+  return(allele.freqs)
+}
+
+# fonction de calcul des fréquences des génotypes hétérozygotes tenant compte des donnees manquantes
+freqhtz <- function (MatG) {
+  htz.freqs <- apply(MatG, 2, function(x){
+    x<-as.numeric(x)
+    if (length(which(is.na(x))) >0 ) { x<-x[-which(is.na(x))]}
+    length(which(x==1))/length(x)
+  })
+  return(htz.freqs)
+}
+
+
+####################################################
+# Fonction de creation de graphes avec seuil
+
+class_graph<-function(Kgraph, id) {
+  Kgraph[Kgraph<id]<-0
+  diag(Kgraph)<-0
+
+   g1<-graph.adjacency(Kgraph,weighted="TRUE",mode="undirected")
+   partition<-fastgreedy.community(g1)
+   lignage_graph<-membership(partition)
+   nbclus<-length(sizes(partition))
+   return(list(lignage_graph,nbclus))
+   }
+
+# faire une image d une matrice
+image.mat <- function(M, ...){
+image(t(M)[,nrow(M):1], ...)
+}
+
+
+```
+## Les packages à charger
+```{r}
+library("data.table")
+library("igraph")
+library("lattice")
+library("seriation")
+
+```
+
+
+# Fichiers de données
+## ARVALIS
+Le fichier de données a été récupéré auprès de Delphine Hourcade et placé dans le répertoire
+C:\Users\david\Documents\RTRA et Campus\EPO\DONNEES ARVALIS
+
+Le fichier de lecture des codes a été repris
+TaBW420K_ARVALIS_Durum_wheat_2015.complete.sample_stats.txt
+
+et transformé en 
+TaBW420K_ARVALIS_Durum_wheat_2015.complete.sample.csv
+
+
+Ce document sert à mettre en forme les données et à leur donner leurs indicateurs de passeport. 
+Plusieurs sources sont à compiler. 
+Le répertoire de travail se trouve sur la dropbox
+
+
+
+# Répertoires et fichiers de données
+
+```{r}
+
+setwd("C:/Users/david/Documents/RTRA et Campus/EPO/DONNEES ARVALIS")
+
+ rm(list=ls())
+
+
+```
+
+Le fichier de données ARVALIS se trouve dans le répertoire "C:/Users/david/Documents/RTRA et Campus/EPO/DONNEES ARVALIS"
+Ce sera le répertoire de travail
+
+Le fichier de données brutes sorti de la puce AXIOM est "TaBW420K_ARVALIS_Durum_wheat_2015.complete.annotatedGTR.txt"
+
+Le fichier de données EPO se trouve lui "C:/Users/david/Documents/RTRA et Campus/EPO/Donnees AXIOM/TaBW420K_CropDL_Durum_Wheat.annotatedGTR.txt"
+
+Les fichiers de codages sont les suivants.
+
+
+
+Le fichier EPO contient différentes accessions : EPO, DR, DC et matériel introgressé.
+
+Il y a eu 4 échantillons qui n'ont pas marché.
+
+# Détermination du contenus des deux fichiers
+## Arvalis
+
+Le fichier de lecture des codes a été repris de 
+TaBW420K_ARVALIS_Durum_wheat_2015.complete.sample_stats.txt
+
+pour donner  
+TaBW420K_ARVALIS_Durum_wheat_2015.complete.sample.csv
+
+Nous allons créer la liste des marqueurs. Nous lisons le fichier avec la fonction fread de la librairie data.table qui permet de lire les gros fichiers de données. 
+Ce premier fichier est organisé en 108 colonnes et un grand nombre de lignes correspondant aux marqueurs.
+
+```{r}
+library("data.table")
+
+file<-"TaBW420K_ARVALIS_Durum_wheat_2015.complete.annotatedGTR.txt"
+G_ARV<-fread(file,sep="\t",data.table = FALSE, na.strings="NA.")
+dim(G_ARV)
+
+
+```
+
+Il y a donc `r dim(G_ARV)[1]` marqueurs et 114 colonnes, 108 individus et 6 colonnes pour décrire les marqueur : `r names(G_ARV)[1:6]`.
+
+Dans ce script on ne récupère que les marqueurs de haute qualité  "PolyHighResolution"  
+
+```{r}
+levels(as.factor(G_ARV$SNP_QUALITY))
+G_ARV<-G_ARV[G_ARV$SNP_QUALITY=="PolyHighResolution",]
+dim(G_ARV)
+
+```
+
+Un fichier décrivant les caractéristiques des marqueurs ARVALIS est créé.
+```{r}
+caract_SNP_ARV<-G_ARV[,c(1:6)]
+save(caract_SNP_ARV, file ="caract_SNP_ARV.Rdata")
+
+```
+
+## EPO
+# lecture du fichier EPO
+```{r}
+file<-"C:/Users/david/Documents/RTRA et Campus/EPO/Donnees AXIOM/TaBW420K_CropDL_Durum_Wheat.annotatedGTR.txt"
+G_EPO<-fread(file,sep="\t",data.table = FALSE, na.strings="NA.")
+```
+
+Il y a donc `r dim(G_EPO)[1]` marqueurs et 114 colonnes, 108 individus et 6 colonnes pour décrire les marqueur : `r names(G_EPO)[1:6]`.
+
+Dans ce script on ne récupère que les marqueurs de haute qualité  "PolyHighResolution"  
+
+```{r}
+levels(as.factor(G_EPO$SNP_QUALITY))
+G_EPO<-G_EPO[G_EPO$SNP_QUALITY=="PolyHighResolution",]
+dim(G_EPO)
+
+```
+
+Un fichier décrivant les caractéristiques des marqueurs EPO est créé.
+```{r}
+caract_SNP_EPO<-G_EPO[,c(1:6)]
+save(caract_SNP_EPO, file ="caract_SNP_EPO.Rdata")
+
+```
+
+
+# Détermination de la liste des marqueurs communs
+## Création de deux fichies contenant les marqueurs ARV et EPO
+Le script peut reprendre ici sans avoir exécuté la partie 1 si elle a déjà été executée au préalable. 
+Les fichiers RData existent et sont dans le répertoire.
+
+Pour pouvoir fusionner les deux fichiers, il faut d'abord pouvoir identifier les marqueurs en communs entre les deux fichiers.
+En effet, il peut y avoir des SNP qui ont été monomorphes (et donc ne sont pas présents dans le fichier) dans un groupe et polymorphes dans l'autre.
+
+Comme les deux fichiers n'ont pas la même organisation des noms de SNPs il faut faire attention à la lecture des caract_SNP_POPX.Rdata.
+
+Dans les questions qui restent à traiter
+  - Quels sont les SNPS qui sont différents ?
+  - Quels sont les SNPS de fréquences différentes
+      - donc il faudra regarder ce qu'il se passe avec les DD et les DC ...
+      Et reprendre les listes spécifiques... 
+      
+Pour Arvalis on crée SNP_ARV
+```{r}
+file="caract_SNP_ARV.Rdata"
+load(file)
+SNP_ARV<-caract_SNP_ARV
+rm(caract_SNP_ARV)
+
+head(SNP_ARV)
+dim(SNP_ARV)
+
+levels(as.factor(SNP_ARV$SNP_QUALITY))
+dim(SNP_ARV)
+
+```
+
+De même pour EPO, on crée SNP_EPO.
+
+```{r}
+file<-"caract_SNP_EPO.Rdata"
+load(file)
+SNP_EPO<-caract_SNP_EPO
+
+names(SNP_EPO)
+levels(as.factor(SNP_EPO$SNP_QUALITY))
+# on ne garde que les PolyHighResolution
+SNP_EPO<-SNP_EPO[SNP_EPO$SNP_QUALITY=="PolyHighResolution",]
+
+head(SNP_EPO)
+dim(SNP_EPO)
+rm(caract_SNP_EPO)
+```
+
+## Détermination de la liste commune (et des listes spécifiques)
+
+La fusion se fait par la clef Probeset_id, car certains SNP_ID sont utilisés plusieurs fois.
+LA fonction merge ne garde que les marqueurs communs aux deux listes.
+
+```{r}
+C<-merge(SNP_ARV, SNP_EPO, by = "PROBESET_ID")
+dim(C)
+
+commun<-C$PROBESET_ID
+length(commun)
+
+```
+
+Par acquit de conscience on peut vérifier le nombre de communs
+```{r}
+#on verifie la taille de C
+length(which(SNP_ARV$PROBESET_ID %in% SNP_EPO$PROBESET_ID))
+
+```
+
+Le nombre de ceux qui sont dans EPO et pas dans ARVA
+
+```{r}
+# ceux qui sont dans EPO et pas dans ARVA
+length(which(!(SNP_EPO$PROBESET_ID %in% SNP_ARV$PROBESET_ID)))
+```
+
+De ceux qui sont dans ARVA et pas dans EPO
+
+```{r}
+# ceux qui sont dans ARVA et pas dans EPO
+length(which(!(SNP_ARV$PROBESET_ID %in% SNP_EPO$PROBESET_ID)))
+
+```
+
+
+## Fusion des deux fichiers sur la liste commune 
+
+On ne garde que les snp qui sont communs pour les deux fichiers.
+```{r}
+G_ARV_com<-G_ARV[which(G_ARV[,1] %in% commun),]
+rm(G_ARV)
+
+G_EPO_com<-G_EPO[which(G_EPO[,1] %in% commun),]
+rm(G_EPO)
+
+```
+
+Les SNP ne sont pas forcément dans le même ordre dans les deux fichiers. Une précaution serait de les trier par nom de SNP.
+```{r}
+
+G_ARV_com[1:3, 1:2]
+G_EPO_com[1:3, 1:2]
+
+# les deux fichiers sont triés dans le meme ordre sur PROBESET_ID
+G_EPO_ordre<-G_EPO_com[order(G_EPO_com[,1]),]
+G_ARV_ordre<-G_ARV_com[order(G_ARV_com[,1]),]
+
+head(GEPO_ordre[1:2,1:2])
+head(GARV_ordre[1:2,1:2])
+
+```
+
+Les deux fichiers sont fusionnés par un simple cbin. Les marqueurs sont en lignes, dans le même ordre et les individus s'additionnent sur les colonnes. Les colonnes de 1 à 6, qui contiennent les descripteurs des marqueurs sont supprimés.
+
+```{r}
+# fusion des deux fichiers
+TOT_ordre<-cbind(G_EPO_ordre,G_ARV_ordre[,-c(1:6)])
+
+# on libère la mémoire
+rm(G_EPO_com,G_ARV_com)
+rm(G_EPO_ordre, G_ARV_ordre)
+
+colnames(TOT_ordre)
+
+```
+
+# Ré affectation des codes des individus
+
+Le fichier des codes Arvalis et EPO sont contenus dans des fichiers différents. Il peut y avoir des problèmes encore dans ces fichiers de codes.
+La seule clef qui est commune est le code de la puce AXiom qui est contenue dans le colnames du fichier TOT_ordre.
+Vérifions qu'il n' y a pas de doublons. La fonction table est pratique pour celà.
+
+```{r}
+which(table(colnames(TOT_ordre))!=1)
+```
+
+
+Il faut désormais ré affecter les codes d'individus
+
+## Lecture et traitement des codes Arvalis
+
+On utilise pour cela un fichier envoyé par Delphine Hourcade qui contient quelques statistiques et donc les deux premières colonnes font le pont entre la variété (VAR) et le code Axim (SAMPLE_NAME).
+
+```{r}
+# lecture des codes ARVALIS 
+codes_ARV<-read.table("TaBW420K_ARVALIS_Durum_wheat_2015.complete.sample.csv", header=TRUE,sep=";",dec=".")
+names(codes_ARV)
+
+codes_ARV$VAR<-as.character(codes_ARV$VAR)
+
+```
+
+Lors de traitements précédents (non reportés ici), il avait été trouvé que LEEDS était orthographié de la même manière pour deux SAMPLE_NAME. 
+Comme nous allons utiliser VAR comme identifiant pour la suite, le second LEEDS est recodé Leeds.
+
+```{r}
+# LEEDS a deux echantillons, on recode  l un des deux 
+which(table(codes_ARV$VAR)==2)
+codes_ARV$VAR[which(codes_ARV$SAMPLE_NAME=="42_LEEDS_B06_290814")]<-"Leeds"
+
+dim(codes_ARV)
+```
+
+La vérification est correcte. Il y a bien 108 individus. 
+
+
+## Lecture et traitement des doublons 
+
+Cette question est beaucoup plus délicate.
+Cinq plaques AxIOM ont été produites et les codes EPO correspondent à plusieurs échantillons de nature différente. Un fichier Codes.Rdata a déjà été produits par une succession complexe de scripts précédents non repris ici. 
+
+```{r}
+# passage des codes de EPO
+load("C:/Users/david/Dropbox/EPO IV/Codes.Rdata")
+Codes_EPO<-Codes
+rm(Codes)
+names(Codes_EPO)
+
+Codes_EPO$Code_AMM<-as.character(Codes_EPO$Code_AMM)
+head(Codes_EPO,2)
+
+```
+
+Tout d'abord, on s'aperçoit qu'un code_AMM est répété... et q'il a deux codes différents pour la généalogie précédente. 
+
+```{r}
+# le code AMM 720 est repete 
+which(table(Codes_EPO$Code_AMM)==2)
+Codes_EPO[Codes_EPO$Code_AMM=="Tm0720",]
+```
+
+Il s'agit de EL4X_504. DE manière arbitraire,  EL4X_504_Ixos est supprimé. Il faudrait vérifier ...
+A vérifier mais Tm0738 (ligne 48) et Tm0724 (ligne 724) sont aussi déclarés IXos !!
+
+```{r}
+Codes_EPO<-Codes_EPO[-466,]
+```
+
+## Création d'un code unique pour gérér la disparité des origines
+EPO est la population d'introgression mais le fichier appelé EPO contient différents matériel dont la variable type rapporte l'origine
+
+```{r}
+levels(as.factor(Codes_EPO$type))
+```
+BSA : quatre individus de bulks
+DC : dicoccum, DD : dicoccoides, DR : blé dur de la collection, DR_BB : lignées introgressées du programme Gérard Poux, DR_Dial : lignées issues du croisement diallèles, DR_E : lignées élites, EPO : lignées issues de la populations
+
+On choisit de garder la variable Code.initial.2010 pour y accumuler l'information des différentes origines. 
+
+```{r}
+# on remplace NA dans la variable Code.initial.2010 par differentes valeurs
+#pour DD et DC par le code collection
+
+Codes_EPO$Code.initial.2010[Codes_EPO$type=="DD"]<-as.character(Codes_EPO$Nom[Codes_EPO$type=="DD"])
+Codes_EPO$Code.initial.2010[Codes_EPO$type=="DC"]<-as.character(Codes_EPO$Nom[Codes_EPO$type=="DC"])
+Codes_EPO$Code.initial.2010[Codes_EPO$type=="DR"]<-as.character(Codes_EPO$Nom[Codes_EPO$type=="DR"])
+Codes_EPO$Code.initial.2010[Codes_EPO$type=="BSA"]<-as.character(Codes_EPO$Code_AMM[Codes_EPO$type=="BSA"])
+
+```
+
+## Fusions des deux fichies de codes Arvalis et EPO
+
+Deux fichiers sont créés avant leur fusion. La variable Code_unique devrait être celle qui remplacera le nom d'individus dans le fichier de données. La source est indiquée (ARV ou EPO), le type reprend celui de EPO (arvalis est passé en DR). Pour Arvalis, Code_unique prend le nom de code variété.
+
+```{r}
+# pour Arvalis
+Code_Arv<-data.frame(Sample_name=as.character(codes_ARV[,1]),Code=as.character(codes_ARV[,2]), Code_unique=as.character(codes_ARV[,2]), Source=rep("ARV",length(codes_ARV[,2])), Type="DR")
+
+# pour EPO
+Code_EPO<-data.frame(Sample_name=as.character(Codes_EPO$Code_AMM),Code=as.character(Codes_EPO$Code_AMM), Code_unique=as.character(Codes_EPO$Code.initial.2010),Source=rep("EPO",length(Codes_EPO$Code_AMM)), Type=Codes_EPO$type)
+
+Codes_Tot<-rbind(Code_Arv,Code_EPO)
+names(Codes_Tot)
+
+# Elimination de ce qui n est plus utile
+rm(Code_EPO, Code_Arv)
+```
+
+## Fabrication du fichier transposé de données
+
+Le fichier de données créé précédemment (TOT_ordre) a les marqueurs en ligne et les individus en colonnes. On va le transposer. 
+
+```{r}
+G<-TOT_ordre
+
+# stockage des noms de colonnes avant transposition (noms des individus)
+namecol<-names(G)
+
+# Stockage des noms de lignes avant transposition (noms des marqueurs)
+# attention ici décide le nom de colonne entre probesetID (1) et SNP_ID (2)
+namerow<-G[,1]
+
+dim(G)
+```
+
+On transpose la matrice des données (sans les colonnes de descriptions) et on ré associe les noms de colonnes et de lignes pour avoir une matrice en ligne avec les individus et en colonnes pour les marqueurs. Remarquez qu'on ne recopie pas les 6 premières colonnes qui contiennent les descriptifs des marqueurs. 
+
+```{r}
+Gt<- t(G[,-c(1:6)])
+
+colnames(Gt)<-namerow
+rownames(Gt)<-namecol[-c(1:6)]
+
+dim(Gt)
+head(Gt[,c(1:2)],2)
+
+
+# Elimination de ce qui n est plus utile
+rm (namerow, namecol)
+```
+
+
+## Remplacement des rownames de la matrice avec le code unique
+
+Cette opération aurait pu être très facile avec la fonction merge, mais celle-ci ne fonctionne pas bien sur les gros fichiers. 
+
+Pour Arvalis, nous avons l'information dans Sample_name. Pour EPO dans Code. 
+Attention cette étape est très délicate. 
+Elle aurait pu être évitée par l'existence d'un fichier homogène liant facilement le Sample-name et le code.
+
+
+```{r}
+X<-Gt
+
+sp=strsplit(c(as.character(rownames(X))),"_")
+
+# il y a eu 8 plaques
+plaque<-levels(as.factor(sapply(sp, "[", 4)))
+Code_AMM<-as.character(sapply(sp, "[", 2))
+
+# plaque 1,2,6,7,8 : Arvalis 
+# plaque 3,4,5 : EPO 
+rownames(X)[grep(plaque[8],rownames(X))]
+
+A<-data.frame(ordreX_depart=1:length(rownames(X)), codeAMM=Code_AMM, valeur_dep=rownames(X), valeur_fin=NA, plaque=as.factor(sapply(sp, "[", 4)))
+
+A$valeur_dep<-as.character(A$valeur_dep)
+A$codeAMM<-as.character(A$codeAMM)
+
+# Attention la fusion avec EPO ne peut marcher que si codeAMM est NA pour Arvalis
+A$codeAMM[A$plaque %in% plaque[c(1,2,6,7,8)] ]<-NA
+
+#Pour Arvalis 
+# On trie le fichier A par valeur_dep
+A<-A[order(A$valeur_dep),]
+
+# On trie le fichier Code_Tot par Sample_name
+Codes_Tot<-Codes_Tot[order(Codes_Tot$Sample_name),]
+
+# quelles sont les A qui sont dans code
+listA<-which(A$valeur_dep %in% Codes_Tot$Sample_name)
+listCode<-which(Codes_Tot$Sample_name %in% A$valeur_dep)
+
+A$valeur_fin[listA]<-as.character(Codes_Tot$Code_unique[listCode])
+
+
+# Pour EPO
+
+# On trie le fichier A par valeur_dep
+A<-A[order(A$codeAMM),]
+
+# On trie le fichier Code_Tot par Code
+Codes_Tot<-Codes_Tot[order(Codes_Tot$Code),]
+
+# quelles sont les A qui sont dans code
+listA<-which(A$codeAMM %in% Codes_Tot$Code)
+length(listA)
+listCode<-which(Codes_Tot$Code %in% A$codeAMM)
+length(listCode)
+
+A$valeur_fin[listA]<-as.character(Codes_Tot$Code_unique[listCode])
+
+# il reste à trier A sur l ordre de départ et l'affecter à rownames(X)
+A<-A[order(A$ordreX_depart),]
+rownames(X) <- A$valeur_fin
+
+# Elimination des tableaux intermédiaires
+rm(A, listA, listCode)
+rm(Gt)
+```
+
+
+### Identification des individus manquants sur la puce
+Il y a quelques individus qui ne sont pas dans le fichier Axiom alors qu'il aurait du y être. 
+Ils correspondent à 4 échantillons qui n'ont pas été lus correctement sur la puce.
+
+Quels sont ces individus , ils n'ont pas été lus 
+
+
+# Recodage des données
+
+Les données sont codées A/A, A/T ou NA. 
+
+On va compter le nombre de niveau de génotypes par snp. on applique ensuite la fonction n_genotypes... plus tard..
+
+
+```{r}
+X<-as.matrix(X)
+SG<-X
+head(SG[,c(1:10)])
+
+
+SG<- apply(X,2, FUN= n_genotypes)
+SG<-as.matrix(SG)
+rownames(SG)<-rownames(X)
+
+# on fait de la place en memoire
+rm(G, TOT_ordre, X)
+
+dim(SG)
+head(SG[1:5,1:5])
+
+# SG contient le fichier de donnees communes entre les fichiers ARV et EPO Sens large
+X<-SG
+
+```
+
+
+# Comment gérer les observations pour les tris pour créer des fichiers
+
+## Contenu des codes
+Toutes les observations pour les marqueurs communs sont maintentant dans le meme fichier
+```{r}
+dim(SG)
+rownames(SG)
+
+```
+
+Pour gérer et extraire des infos dans le même fichier, il faut utiliser la table Codes_Tot
+
+```{r}
+names(Codes_Tot)
+Codes_Tot$Code
+```
+
+La variable "Sample_name" contient soit le Sample_name de la puce Axiom (pour les données Arvalis) soit le code AMM pour EPO. Ensiuote
+
+La variable "Code" contient le nom de la variété pour Arvalis ou le code AMM pour EPO
+La variable "Code_unique" contient elle les codes EPO (dans la numérotation de 2010)
+La variable "Source" contient soit EPO soit ARV.
+La variable "Type" contient la nature du matériel et peut servir à trier DR , DC et EPO etc.. 
+
+## Utilisation 
+Par exemple un fichier contenant tous les blés durs classiques doit être créé.
+Il s'agit de la somme de ARV plus des différents blés dur DR de EPO.
+
+```{r}
+levels(as.factor(Codes_Tot$Type))
+
+list_DR<- as.character( Codes_Tot$Code_unique[Codes_Tot$Type=="DR" | Codes_Tot$Type=="DR_dial" | Codes_Tot$Type=="DR_E" | Codes_Tot$Type=="DR_BB"])
+
+```
+
+Une fois cette liste créée, la matrice X de génotype est extraite.
+
+```{r}
+X_DR<-SG[which(rownames(SG) %in% list_DR),]
+dim(X_DR)
+X_DR[1:3,1:3]
+```
+
+# Analyse des blés durs
+
+Dans un premier temps nous allons analyser les données de blé dur.
+Les données ont déjà été transformées en {0,1,2} pour les différentes formes génotypiques.
+
+## Données manquantes
+Comme les données manquantes sont peu importantes, elles vont être remplacées par un simple tirage dans une binomiale qui a comme espérance la fréquence allélique moyenne de l'échantillon.
+Il existe des méthodes plus appropriées d'imputation mais elles n'ont pas encore été mise en oeuvre ici.
+
+```{r}
+SG_DR<-apply(X_DR,MARGIN=2,FUN=tirage)
+dim(SG_DR)
+
+rownames(SG_DR)<-rownames(X_DR)
+colnames(SG_DR)<-colnames(X_DR)
+
+```
+
+## Calcul des fréquences alleliques
+
+Nous pouvons calculer les fréquences alléliques et observer leur distribution.
+
+```{r}
+Freq_DR<-freqall(SG_DR)
+hist(Freq_DR)
+
+```
+
+
+## Estimation de la Kinship
+
+Il est intéressant de regarder l'apparentement dans la matrice.
+
+```{r}
+K.IBS_DR<-estimKinship2(SG_DR)
+K.IBS_DR[1:2,1:2]
+dim(K.IBS_DR)
+
+Kgraph<-K.IBS_DR
+hist(Kgraph, breaks=c(100:200)/200, main="Distribution of the IBS Kinship values of Durum wheat "
+    , col="blue", cex.main=2, xlab="IBS values", ylab="")
+
+
+# par la méthode de Timothée , passer par le package RRBlup ?
+#A.mat <- SG_DR %*% t(SG_DR)
+
+```
+
+## Représentation ré ordonnée de la matrice de Kinship
+La matrice de distance peut aussi être ré-ordonnée pour faire apparaitre des groupes d'individus, qui se répartissent le long de la diagonale. 
+
+```{r}
+d <- as.dist(1-K.IBS_DR)
+ 
+## default seriation
+order <- seriate(d, method="ARSA")
+## plot
+# pimage(d, main = "Random")
+pimage(d, order), main = "Reordered")
+
+```
+
+## Structuration par les méthodes multivariées
+
+### Par clusterisation
+Une manière de représenter cette matrice de distance est 
+```{r}
+K.IBS2<-as.dist(1-K.IBS_DR)
+
+clust <- hclust(K.IBS2, method = "ward.D", members=NULL)     # création de l'arbre
+plot(clust, cex=0.6)
+
+```
+
+Certains groupes apparaissent. 
+Les génotypes ayant le même nom sont très proches.
+
+### Par multi dimensional scaling
+CMD<-cmdscale(K.IBS2, k = 5, eig = TRUE, add = FALSE, x.ret = FALSE)
+COORD<-as.data.frame(CMD[[1]])
+names(COORD)<-c("C1","C2","C3","C4","C5")
+COORD$ligne<-rownames(X_DR)
+
+#groupe1<- rownames(X_DR)[which(lignageEPO_graph[,1]=="1")]
+# couleur<-(lignageEPO_graph[,1]=="1")*1
+
+plot(COORD$C1,COORD$C2, 
+xlab="Principal Component 1", ylab="Principal Component 2" ,pch=21, cex=0.5, col=couleur)
+text(COORD$C1, COORD$C2, COORD$ligne, cex=0.6) 
+
+
+## Construction d'un réseau au sein  de la matrice de Kinship
+
+Toutes les arêtes de la matrice sont mises à 0 en dessous d'un certain seuil.
+Le graphe est effectué ensuite.
+
+La fonction permet de seuiller la matrice à des taux donnés.
+
+```{r}
+Kgraph<-K.IBS_DR
+
+c99<-class_graph(Kgraph,0.99)
+c98<-class_graph(Kgraph,0.98)
+c97<-class_graph(Kgraph,0.97)
+c96<-class_graph(Kgraph,0.96)
+c95<-class_graph(Kgraph,0.95)
+c94<-class_graph(Kgraph,0.94)
+c93<-class_graph(Kgraph,0.93)
+c92<-class_graph(Kgraph,0.92)
+c91<-class_graph(Kgraph,0.91)
+c90<-class_graph(Kgraph,0.90)
+c89<-class_graph(Kgraph,0.89)
+c85<-class_graph(Kgraph,0.85)
+c80<-class_graph(Kgraph,0.80)
+c75<-class_graph(Kgraph,0.75)
+
+
+# la liste 1 contient la répartition des individus dans les différentes partitions 
+
+list99<-c99[[1]]
+list99<-list99[order(list99)]
+
+list98<-c98[[1]]
+list98<-list98[order(list98)]
+
+list97<-c97[[1]]
+list97<-list97[order(list97)]
+
+list96<-c96[[1]]
+list96<-list96[order(list96)]
+
+list95<-c95[[1]]
+list95<-list95[order(list95)]
+
+list94<-c94[[1]]
+list94<-list94[order(list94)]
+
+list93<-c93[[1]]
+list93<-list93[order(list93)]
+
+list92<-c92[[1]]
+list92<-list92[order(list92)]
+
+list91<-c91[[1]]
+list91<-list91[order(list91)]
+
+list90<-c90[[1]]
+list90<-list90[order(list90)]
+
+list89<-c89[[1]]
+list89<-list89[order(list89)]
+
+list85<-c85[[1]]
+list85<-list85[order(list85)]
+
+list80<-c80[[1]]
+list80<-list80[order(list80)]
+
+list75<-c75[[1]]
+list75<-list75[order(list75)]
+
+# on peut connaitre ainsi les variétés qui se groupent dans le même graphe à une seuil donné
+list99[list99 %in% which(table(list99)!=1)]
+list98[list98 %in% which(table(list98)!=1)]
+list97[list97 %in% which(table(list97)!=1)]
+list96[list96 %in% which(table(list96)!=1)]
+list95[list95 %in% which(table(list95)!=1)]
+list94[list94 %in% which(table(list94)!=1)]
+list93[list93 %in% which(table(list93)!=1)]
+list92[list92 %in% which(table(list92)!=1)]
+list91[list91 %in% which(table(list91)!=1)]
+list90[list90 %in% which(table(list90)!=1)]
+list89[list89 %in% which(table(list89)!=1)]
+list85[list85 %in% which(table(list85)!=1)]
+list80[list80 %in% which(table(list80)!=1)]
+list75[list75 %in% which(table(list75)!=1)]
+
+
+# ceux qui ne sont pas liés
+list85[list85 %in% which(table(list85)==1)]
+list80[list80 %in% which(table(list80)==1)]
+list75[list75 %in% which(table(list75)==1)]
+
+# nombre de partitions
+#n99<-c99[[2]]
+
+```
+
+On voit qu'au dessus de 96% d'identité, seuls les génotypes portant le même nom de variété sont assemblés ensemble.
+A 96%, les génotypes de Isildur et de Liberdur se regroupent. 
+A 94%, Rascon/Tarro se regroupe avec Altar84. 
+A 93%, Edmore se regroupe avec Neodur.
+A 92%, Néodur rejoint Lloyd, Pescadou rejoint Sybanco, Luminur, 
+
+Il y a deux groupes qui finissent par se former, un plutot méditerranéen (?), un autre plutôt nord américain.
+
+Soldur n est jamais lié.
+Le matériel de Gérard n'a rien de spécifique
+Les lignées du diallele se lient de manière cohérente.
+
+# A virer
+#load("C:/Users/david/Dropbox/EPO IV/lignageEPO_graph.Rdata" )
+#lignageEPO_graph<-as.data.frame(lignageEPO_graph)
+#lignageEPO_graph$Code<-rownames(lignageEPO_graph)
+
+#######################
+# donc il y a bien identification des groupes
+
+
+# on ne garde qu un individu par groupe ?
+lignageEPO_graph <- lignageEPO_graph[order(lignageEPO_graph[,1]),]
+un_par_groupe <- lignageEPO_graph[which(!duplicated(lignageEPO_graph[,1])),]
+
+#liste_EPO<-as.character(Codes_Tot$Code[which(Codes_Tot$Type=="EPO" )])
+liste_EPO_graph<-un_par_groupe$Code
+
+
+X_EPO_graph<-SG[which(rownames(SG) %in% liste_EPO_graph),]
+dim(X_EPO_graph)
+
+SG_EPO_graph<-apply(X_EPO_graph,MARGIN=2,FUN=tirage)
+rownames(SG_EPO_graph)<-rownames(X_EPO_graph)
+colnames(SG_EPO_graph)<-colnames(X_EPO_graph)
+K.IBS_EPO_graph<-estimKinship2(SG_EPO_graph)
+
+
+Kgraph<-K.IBS_EPO_graph
+hist(Kgraph, breaks=c(100:200)/200, main="Distribution of the IBS Kinship values "
+    , col="blue", cex.main=2, xlab="IBS values", ylab="")
+
+Kgraph[Kgraph<0.90]<-0
+diag(Kgraph)<-0
+
+g1<-graph.adjacency(Kgraph,weighted="TRUE",mode="undirected")
+partition<-fastgreedy.community(g1)
+lignageEPO_graph<-as.matrix(membership(partition))
+nbclus<-length(sizes(partition))
+
+couleur<- lignageEPO_graph[,1]
+
+K.IBS2<-1-K.IBS_EPO_graph
+CMD<-cmdscale(K.IBS2, k = 5, eig = TRUE, add = FALSE, x.ret = FALSE)
+
+COORD<-as.data.frame(CMD[[1]])
+names(COORD)<-c("C1","C2","C3","C4","C5")
+COORD$ligne<-rownames(X_EPO_graph)
+
+plot(COORD$C1,COORD$C2, 
+xlab="Principal Component 1", ylab="Principal Component 2" ,pch=21, cex=0.5, col=couleur)
+text(COORD$C1, COORD$C2, COORD$ligne, cex=0.6) 
+
+####" fin de l'histoire"
+
+
+
+
+
+# Analyse de EPO
+
+# il y a eun un soucis avec le fichier des  lignées non apparentées fait précédemment 
+# on les recree
+
+X_EPO<-SG[which(rownames(SG) %in% liste_EPO_EPO),]
+dim(X_EPO)
+
+
+#### transfo des valeurs genotypiques...
+SG_EPO<- apply(X_EPO,2, FUN= n_genotypes)
+SG_EPO<-as.matrix(SG_EPO)
+rownames(SG_EPO)<-rownames(X_EPO)
+
+SG_EPO[1:5,1:5]
+
+SG_EPO<-apply(X_EPO,MARGIN=2,FUN=tirage)
+rownames(SG_EPO)<-rownames(X_EPO)
+colnames(SG_EPO)<-colnames(X_EPO)
+K.IBS_EPO<-estimKinship2(SG_EPO)
+
+Kgraph<-K.IBS_EPO
+hist(Kgraph, breaks=c(100:200)/200, main="Distribution of the IBS Kinship values "
+    , col="blue", cex.main=2, xlab="IBS values", ylab="")
+
+Kgraph[Kgraph<0.95]<-0
+diag(Kgraph)<-0
+
+g1<-graph.adjacency(Kgraph,weighted="TRUE",mode="undirected")
+partition<-fastgreedy.community(g1)
+lignageEPO_graph<-as.matrix(membership(partition))
+nbclus<-length(sizes(partition))
+
+  
+
+
+############################################### 
+# fusion des deux listes
+liste<-c(liste_ARV,liste_EPO_graph)
+
+X_BD<-SG[which(rownames(SG) %in% liste),]
+dim(X_BD)
+
+groupe<-c(rep("red", length(liste_ARV)),rep("Blue",length(liste_EPO_graph)) )
+
+SG2<-apply(X_BD,MARGIN=2,FUN=tirage)
+which(is.na(SG2))
+rownames(SG2)<-rownames(X_BD)
+colnames(SG2)<-colnames(X_BD)
+
+SG2[1:5,1:5]
+
+K.IBS<-estimKinship2(SG2)
+
+K.IBS[1:5,1:5]
+
+```
+
+La distribution des valeurs d'apparentement est la suivante
+```{r}
+
+hist(K.IBS,col=rgb(233 , 56 , 63, maxColorValue = 255),border="white",main="Distribution of IBS distance",
+     xlab="IBS coefficients", ylab="")
+
+```
+
+Pour une représentation sous forme d'arbre, ma matrice d'apparentement est transformée en une matrice de distance. La clusterisation est faite par la méthode Ward (celà peut être revu). 
+En première analyse, il y a beaucoup de structuration entre lignées. 
+
+```{r}
+
+K.IBS2<-as.dist(1-K.IBS)
+
+clust <- hclust(K.IBS2, method = "ward", members=NULL)     # création de l'arbre
+plot(clust, cex=0.6)
+
+
+# loading the package
+install.packages('dendextend') # it is now on CRAN
+library(dendextend)# let's add some color:
+
+# define dendrogram object to play with:
+dend <- as.dendrogram(clust)
+
+# ca marche pas labels_colors(dend) <- groupe[order.dendrogram(dend)]
+
+coul_feuil<-as.matrix(labels_colors(dend))
+
+labels_colors(dend) <- "red"
+labels_colors(dend)[which(grepl("Tm",rownames(coul_feuil))) ] <- "blue"
+dend <- set(dend, "labels_cex", 0.2)
+
+plot(dend)
+
+# representation multivariée
+CMD<-cmdscale(K.IBS2, k = 5, eig = TRUE, add = FALSE, x.ret = FALSE)
+
+COORD<-as.data.frame(CMD[[1]])
+names(COORD)<-c("C1","C2","C3","C4","C5")
+COORD$ligne<-rownames(SG2)
+
+plot(COORD$C1,COORD$C2, 
+xlab="Principal Component 1", ylab="Principal Component 2" ,pch=21, cex=0.5, col=groupe)
+text(COORD$C1, COORD$C2, COORD$ligne, cex=0.6) 
+
+
+# les indices de diversité et les frequences alléliques
+
+X_EPO<-SG[which(rownames(SG) %in% liste_EPO),]
+dim(X_EPO)
+SG_EPO<-apply(X_EPO,MARGIN=2,FUN=tirage)
+
+X_ARV<-SG[which(rownames(SG) %in% liste_ARV),]
+dim(X_ARV)
+SG_ARV<-apply(X_ARV,MARGIN=2,FUN=tirage)
+
+
+freq.EPO<-freqall(SG_EPO)
+freq.ARV<-freqall(SG_ARV)
+
+plot(freq.EPO,freq.ARV)
+
+freqhtz_EPO<-freqhtz(SG_EPO)
+freqhtz_ARV<-freqhtz(SG_ARV)
+
+# calcul de He et Fis
+he_EPO<-2*freq.EPO*(1-freq.EPO)
+he_ARV<-2*freq.ARV*(1-freq.ARV)
+
+hist(he_EPO)
+mean(he_EPO)
+
+hist(he_ARV)
+mean(he_ARV)
+
+length(which(freq.ARV==0))
+
+cov(he_EPO,he_ARV)/var(he_EPO)
+
+
+Fis<-1-freqhtz/he
+
+
+
+
+
+
+# analyse de la matrice de la Kinship. 
+# on groupe par lignage avec une limite de 0.95
+
+####################################################
+# alternative avec graph
+library("igraph")
+library("lattice")
+
+Kgraph<-K.IBS
+
+class_graph<-function(Kgraph, id) {
+  Kgraph[Kgraph<id]<-0
+  diag(Kgraph)<-0
+
+   g1<-graph.adjacency(Kgraph,weighted="TRUE",mode="undirected")
+   partition<-fastgreedy.community(g1)
+   lignage_graph<-membership(partition)
+   nbclus<-length(sizes(partition))
+   return(list(lignage_graph,nbclus))
+   }
+
+c99<-class_graph(Kgraph,0.99)
+list99<-c99[[1]]
+list99<-list99[order(list99)]
+n99<-c99[[2]]
+
+
+id<-0.8
+Y<-class_graph(Kgraph,id)
+Z<-Y[[1]]
+Z<-Z[order(Z)]
+N<-Y[[2]]
+
+class_x<-Y[[1]]
+class_x[class_x>9]<-0
+
+coord<-COORD$ligne
+x<-COORD$C1
+y<-COORD$C2
+couleur<-class_x
+
+if (sum(class_x>0))  { 
+         x<-x[-which(class_x==0)] 
+         y<-y[-which(class_x==0)] 
+         couleur<-couleur[-which(class_x==0)]
+         coord<-coord[-which(class_x==0)]
+}
+
+
+plot(x,y, main=paste("clusters identité ", id , sep=" "),
+xlab="Principal Component 1", ylab="Principal Component 2", 
+col=couleur ,pch=21, cex=0.03)
+text(x, y, coord, cex=0.5, col=couleur)
+
+
+```
+
+reprise des analyses ... a faire plus tard
+
+freq.EPO_polym<-freqall(SG)
+freq.ARV_polym<-freqall(SG)
+
+hist(freq.EPO_polym)
+length(which(freq.EPO_polym!=1))
+# ils sont tous polymorphes chez EPO_Polym 66364, he mean= 0.11, 20 619 avec une MAF > 0.05
+length(which(freq.EPO_polym>0.05 & freq.EPO_polym>0.95 ))
+mean(2*freq.EPO_polym*(1-freq.EPO_polym))
+
+hist(freq.ARV_polym)
+length(which(freq.ARV_polym==0))
+length(which(freq.ARV_polym==1))
+
+# ils sont tous polymorphes chez EPO_Polym 66364, he mean= 0.21, 7190  avec une MAF > 0.05
+length(which(freq.ARV_polym>0.05 & freq.ARV_polym>0.95 ))
+mean(2*freq.ARV_polym*(1-freq.ARV_polym))
+
+
+
